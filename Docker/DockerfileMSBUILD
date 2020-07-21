@@ -1,0 +1,75 @@
+# escape=`
+FROM openjdk:8-windowsservercore as builder
+
+SHELL ["powershell.exe", "-ExecutionPolicy", "Bypass", "-Command"]
+
+#RUN mkdir /jenkins
+#RUN [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+#RUN powershell -Command `
+#    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 ; `
+#    wget "https://repo.jenkins-ci.org/releases/org/jenkins-ci/plugins/swarm-client/$env:JENKINS_SWARM_VERSION/swarm-client-$env:JENKINS_SWARM_VERSION.jar" -Outfile "c:\\jenkins\\swarm-client-$env:JENKINS_SWARM_VERSION.jar"  
+
+
+#install Docker and Docker-compose
+ENV DOCKER_VERSION 18.03.1-ee-3
+ENV DOCKER_DOWNLOAD_URL https://download.docker.com/components/engine/windows-server/18.03/docker-18.03.1-ee-3.zip
+
+RUN Invoke-WebRequest -Uri $env:DOCKER_DOWNLOAD_URL -OutFile 'docker.zip'
+RUN Expand-Archive -Path docker.zip -DestinationPath '/Program Files/'    
+
+# https://docs.docker.com/compose/install/#install-compose
+ENV dockerComposeVersion '1.22.0'
+RUN [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; `
+    Invoke-WebRequest "https://github.com/docker/compose/releases/download/$env:dockerComposeVersion/docker-compose-Windows-x86_64.exe" -UseBasicParsing -OutFile $Env:ProgramFiles\docker\docker-compose.exe
+
+# Use the latest Windows Server Core image with .NET Framework 4.7.2.
+FROM microsoft/dotnet-framework:3.5-runtime
+
+SHELL ["powershell.exe", "-ExecutionPolicy", "Bypass", "-Command"]
+
+COPY --from=builder ["/ojdkbuild/", "/ojdkbuild/"]
+RUN [Environment]::SetEnvironmentVariable('PATH', 'C:\ojdkbuild\bin;' + $env:PATH, 'Machine')
+
+COPY --from=builder ["/Program Files/Docker/",  "/Program Files/Docker/"] 
+RUN [Environment]::SetEnvironmentVariable('PATH', $env:PATH + ';C:\Program Files\Docker', 'Machine')
+
+# Restore the default Windows shell for correct batch processing below.
+SHELL ["cmd", "/S", "/C"]
+
+#install msbuild
+ADD OfflineVS2019 c:\Offline
+
+RUN certutil -addstore "Root" c:\Offline\certificates\manifestCounterSignRootCertificate.cer
+RUN certutil -addstore "Root" c:\Offline\certificates\manifestRootCertificate.cer
+RUN certutil -addstore "Root" c:\Offline\certificates\vs_installer_opc.RootCertificate.cer
+ 
+RUN c:\Offline\vs_buildtools.exe --wait --quiet --norestart --noWeb --nocache || IF "%ERRORLEVEL%"=="3010" EXIT 0
+
+SHELL ["powershell.exe", "-ExecutionPolicy", "Bypass", "-Command"]
+
+WORKDIR /
+ADD ./Git-2.14.1-64-bit.exe Git-2.14.1-64-bit.exe
+RUN Start-Process -FilePath .\Git-2.14.1-64-bit.exe -ArgumentList '/loadinf:git.inf /verysilent' -Wait -NoNewWindow
+ADD swarm-client-3.9.jar c:\
+
+ENV JENKINS_SWARM_VERSION 3.9
+
+ENV JENKINS_MEMORY=200M
+
+ENV SWARM_MASTER=http://jenkins.cds.int
+ENV SWARM_EXECUTORS=1
+ENV SWARM_LABELS="docker_windowscore"
+ENV SWARM_HOME="c:\\"
+ENV MYTIMEZONE="America/Toronto"
+ENV JAVA_OPTS="-Xms$JENKINS_MEMORY -Xmx$JENKINS_MEMORY -Djava.awt.headless=true -Duser.timezone=$MYTIMEZONE -Dorg.apache.commons.jelly.tags.fmt.timeZone=$MYTIMEZONE"
+
+#VOLUME C:\workspace
+RUN mkdir c:\workspace
+ADD ./entrypoint.ps1 entrypoint.ps1
+ADD ./labels labels
+RUN icacls C:\ /grant ContainerAdministrator:F 
+
+#RUN & git clone --recurse-submodules git@cktengrep01:SSD/SSD.git c:\workspace\SSD
+ADD ./entrypoint.bat entrypoint.bat
+
+CMD ["cmd.exe", "/S", "/C", ".\\entrypoint.bat"]
